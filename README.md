@@ -67,6 +67,7 @@ recommendation_agent/
 ├── grok_client.py                 # LLM API wrapper (Grok/Groq, all calls go here)
 ├── requirements.txt
 ├── README.md
+├── report.txt
 ├── .gitignore
 ├── steps/
 │   ├── __init__.py
