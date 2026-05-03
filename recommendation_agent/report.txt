@@ -1,0 +1,68 @@
+1. Problem Statement
+
+This agent addresses the problem of personalised media recommendation. Given a user’s natural language description of what they enjoy watching or reading, it generates a structured and actionable report of titles they are likely to enjoy, along with match scores, personalised explanations, and potential mismatches.
+
+A single large language model prompt is not sufficient for this task. While an LLM can generate plausible recommendations, it cannot reliably verify whether titles exist, access up-to-date metadata, or reason deeply about individual preferences. As a result, such outputs often become confident guesses rather than grounded recommendations. The multi-step chaining approach solves this limitation by decomposing the problem into smaller, well-defined stages. First, the system interprets the user’s intent and converts it into a structured taste profile. It then retrieves real candidate titles from external databases, evaluates how well each candidate matches the user’s preferences, generates personalised explanations, and finally compiles everything into a coherent report. Each step produces intermediate structured outputs, which significantly improves both accuracy and transparency compared to a single-step approach. :contentReference[oaicite:0]{index=0}
+
+
+2. Chain Design
+
+The system is designed as a five-step pipeline, where each step operates on a shared state and performs a distinct function. The first step uses an LLM to convert the user’s raw input into a structured taste profile. This profile includes attributes such as genres, themes, mood, preferred era, disliked elements, and any example titles mentioned by the user. This structured representation is essential because it serves as the foundation for all subsequent steps.
+
+The second step involves external tool calls rather than an LLM. Using the extracted genres, themes, and example titles, the system queries the Open Library API for books and the OMDb API for movies. This step retrieves real-world data in the form of structured candidate items, including metadata such as title, year, genre, and ratings. Separating this step ensures that the system relies on verified data instead of generating information from memory.
+
+In the third step, the LLM evaluates the retrieved candidates against the taste profile. Each candidate is scored on a scale from 0 to 10 based on how well it aligns with the user’s preferences. The system then produces a ranked shortlist along with explanations for each score and notes on potential mismatches. This step depends on both the structured taste profile and the real candidate data, making it a critical reasoning stage.
+
+The fourth step focuses on the top recommendations from the shortlist. The LLM generates detailed, personalised analyses for each selected title, discussing aspects such as tone, pacing, themes, and relevance to the user’s preferences. It also provides honest warnings to ensure the recommendations remain trustworthy and nuanced.
+
+Finally, the fifth step synthesises all prior outputs into a polished report. This report includes a summary of the taste profile, detailed sections for each top recommendation, additional suggestions, and a transparency note explaining how the recommendations were generated. The modular nature of this design ensures that each stage contributes meaningfully to the final output, resulting in a system that is both reliable and interpretable. :contentReference[oaicite:1]{index=1}
+
+
+3. Tool Integration
+
+The system integrates two external APIs during the retrieval stage. The Open Library API provides book-related metadata such as titles, authors, publication years, and subject tags, while the OMDb API supplies movie-related information including plot summaries, cast details, runtime, and ratings. These tools are essential because they introduce real-world, verifiable data into the pipeline, something that an LLM alone cannot guarantee.
+
+The outputs from these APIs are normalised into a consistent format and stored as candidate objects within the shared state. These candidates are then passed to the scoring stage, where the LLM evaluates them against the user’s taste profile. There is also a direct connection between the first and second steps: any example titles extracted from the user’s input are used as direct search queries. This ensures that known preferences are handled accurately rather than inferred indirectly. In cases where the APIs fail or return insufficient results, the system falls back to LLM-generated recommendations, which are clearly marked to distinguish them from verified data. :contentReference[oaicite:2]{index=2}
+
+
+4. Limitations
+
+Despite its structured design, the system has several limitations. One major issue is the limited coverage of non-English content in the OMDb API, particularly for Bollywood and regional cinema. When users provide only general preferences without specific titles, the retrieval step may fail to produce relevant candidates.
+
+Another limitation is the system’s dependence on the quality of user input. If the input is vague or minimal, the extracted taste profile becomes sparse, which negatively affects all subsequent steps. Since the system does not currently include a mechanism for asking clarifying questions, this issue propagates through the entire pipeline.
+
+Additionally, inconsistencies in Open Library’s subject tagging can lead to inaccurate scoring, as relevant themes may not always be properly labelled. Finally, the multi-step nature of the system introduces latency, with several sequential API and LLM calls resulting in response times of up to 30 seconds.
+
+
+5. Reflection
+
+There are several ways this system could be improved. Introducing a web search step between retrieval and scoring would significantly enhance the quality of candidate recommendations, especially for domains where API coverage is weak. Making the taste profile extraction step iterative would also improve robustness, allowing the system to ask clarifying questions when the input is insufficient.
+
+Another important improvement would be replacing OMDb with a more comprehensive movie database such as TMDB, which offers better support for international content and more flexible filtering options. Together, these enhancements would make the system more accurate, responsive, and adaptable to a wider range of user preferences.
+
+
+Regarding use of AI assistance during development: an LLM (Claude, via
+Cursor) was used. The main corrections required
+were fixing the Python import path setup (the steps directory needed to be
+added to sys.path before importing step modules), fixing a circular import
+in steps/__init__.py, fixing the API key priority logic (GROK_API_KEY was
+checked before GROQ_API_KEY, causing the agent to attempt the broken xAI
+key even when a working Groq key was set), and removing a redundant local
+import inside the _fallback_shortlist function. The prompt for Step 1
+was also revised after testing: the original version did not enforce an
+explicit JSON schema, which caused inconsistent key names across runs
+(genre vs genres, theme vs themes) that broke Step 2's dictionary lookups.
+Adding the explicit schema with enumerated values for mood and preferred_era
+fixed this.
+
+
+================================================================================
+REFERENCES
+
+Open Library API — https://openlibrary.org/developers/api
+OMDb API — https://www.omdbapi.com
+Groq API — https://console.groq.com
+xAI Grok API — https://console.x.ai
+================================================================================
+
+
