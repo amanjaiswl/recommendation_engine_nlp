@@ -1,0 +1,11 @@
+# Generated outputs — don't commit reports or state files
+outputs/*.md
+outputs/*.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.env
+venv/
+.venv/
