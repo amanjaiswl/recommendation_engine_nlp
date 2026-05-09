@@ -1,60 +1,137 @@
 1. Problem Statement
 
-This agent addresses the problem of personalised media recommendation. Given a user’s natural language description of what they enjoy watching or reading, it generates a structured and actionable report of titles they are likely to enjoy, along with match scores, personalised explanations, and potential mismatches.
+This agent solves personalised media recommendations. Given a natural language description of what a user enjoys watching or reading, it produces a ranked, explained list of titles they are likely to enjoy, complete with match scores, personalised reasoning, and honest caveats.
 
-A single large language model prompt is not sufficient for this task. While an LLM can generate plausible recommendations, it cannot reliably verify whether titles exist, access up-to-date metadata, or reason deeply about individual preferences. As a result, such outputs often become confident guesses rather than grounded recommendations. The multi-step chaining approach solves this limitation by decomposing the problem into smaller, well-defined stages. First, the system interprets the user’s intent and converts it into a structured taste profile. It then retrieves real candidate titles from external databases, evaluates how well each candidate matches the user’s preferences, generates personalised explanations, and finally compiles everything into a coherent report. Each step produces intermediate structured outputs, which significantly improves both accuracy and transparency compared to a single-step approach. :contentReference[oaicite:0]{index=0}
+A single LLM prompt cannot do this reliably. An LLM asked to recommend in one shot will hallucinate titles, fabricate ratings, and produce vague justifications because it has no access to live databases and no mechanism to verify what it generates. Multi-step chaining solves this by separating intent extraction, real-data retrieval, reasoning, and report writing into distinct stages. Each stage has a clear input and output contract, and errors or gaps in one stage can be caught before they propagate further.
 
 
 2. Chain Design
 
-The system is designed as a five-step pipeline, where each step operates on a shared state and performs a distinct function. The first step uses an LLM to convert the user’s raw input into a structured taste profile. This profile includes attributes such as genres, themes, mood, preferred era, disliked elements, and any example titles mentioned by the user. This structured representation is essential because it serves as the foundation for all subsequent steps.
+The pipeline has five steps sharing a single state dictionary. Step 1 sends the user's raw text to an LLM and receives back a structured JSON taste profile containing genres, themes, mood, preferred era, disliked elements, and any example titles the user mentioned. Extracting this as a separate step is essential because every downstream step depends on consistent, named fields — not free text.
 
-The second step involves external tool calls rather than an LLM. Using the extracted genres, themes, and example titles, the system queries the Open Library API for books and the OMDb API for movies. This step retrieves real-world data in the form of structured candidate items, including metadata such as title, year, genre, and ratings. Separating this step ensures that the system relies on verified data instead of generating information from memory.
+Step 2 is the tool call. It uses the genres and example titles from the profile to query two external APIs and returns a list of real candidate items with verified metadata. This step has no LLM; it is purely retrieval, which is why it must be separate from the reasoning steps.
 
-In the third step, the LLM evaluates the retrieved candidates against the taste profile. Each candidate is scored on a scale from 0 to 10 based on how well it aligns with the user’s preferences. The system then produces a ranked shortlist along with explanations for each score and notes on potential mismatches. This step depends on both the structured taste profile and the real candidate data, making it a critical reasoning stage.
+Step 3 sends the taste profile and the full candidate list to an LLM, which scores each candidate 0–10 against the profile and returns a ranked shortlist with match reasons and concerns. This step cannot run before Step 2 because it needs real candidates, and cannot run before Step 1 because it needs the structured profile to score against.
 
-The fourth step focuses on the top recommendations from the shortlist. The LLM generates detailed, personalised analyses for each selected title, discussing aspects such as tone, pacing, themes, and relevance to the user’s preferences. It also provides honest warnings to ensure the recommendations remain trustworthy and nuanced.
+Step 4 takes the top three shortlisted items and runs a separate LLM call per title, producing a detailed personalised analysis — pitch, tone, pacing, hook, and fair warning. Calling the LLM once per title rather than all at once prevents the model from producing compressed, generic text when balancing multiple items in one context.
 
-Finally, the fifth step synthesises all prior outputs into a polished report. This report includes a summary of the taste profile, detailed sections for each top recommendation, additional suggestions, and a transparency note explaining how the recommendations were generated. The modular nature of this design ensures that each stage contributes meaningfully to the final output, resulting in a system that is both reliable and interpretable. :contentReference[oaicite:1]{index=1}
+Step 5 takes the taste profile, the full shortlist, and the three deep-dive analyses and asks an LLM to synthesise them into a formatted Markdown report ready for the user. This is a free-text generation step, not a JSON step, because the output is meant for reading, not further parsing.
 
 
 3. Tool Integration
 
-The system integrates two external APIs during the retrieval stage. The Open Library API provides book-related metadata such as titles, authors, publication years, and subject tags, while the OMDb API supplies movie-related information including plot summaries, cast details, runtime, and ratings. These tools are essential because they introduce real-world, verifiable data into the pipeline, something that an LLM alone cannot guarantee.
+The system uses two APIs: Open Library for books and OMDb for movies. Open Library was chosen because it is free, requires no authentication, and returns subject tags that map reasonably well to the genre and theme vocabulary the LLM produces in Step 1. OMDb was chosen for movies because it provides structured fields — director, genre, plot, IMDb rating — that translate directly into the scoring prompt for Step 3.
 
-The outputs from these APIs are normalised into a consistent format and stored as candidate objects within the shared state. These candidates are then passed to the scoring stage, where the LLM evaluates them against the user’s taste profile. There is also a direct connection between the first and second steps: any example titles extracted from the user’s input are used as direct search queries. This ensures that known preferences are handled accurately rather than inferred indirectly. In cases where the APIs fail or return insufficient results, the system falls back to LLM-generated recommendations, which are clearly marked to distinguish them from verified data. :contentReference[oaicite:2]{index=2}
+The API outputs are normalised into a common candidate schema (title, author/director, year, subjects/genre, plot, rating) before entering the chain. The example titles from the taste profile are used as direct search queries, ensuring that titles the user explicitly mentioned are searched for first. The structured candidate list is then embedded verbatim into the Step 3 user prompt. If both APIs return empty results, Step 3 falls back to a secondary LLM prompt that generates known titles from training knowledge, clearly marked as unverified.
 
 
 4. Limitations
 
-Despite its structured design, the system has several limitations. One major issue is the limited coverage of non-English content in the OMDb API, particularly for Bollywood and regional cinema. When users provide only general preferences without specific titles, the retrieval step may fail to produce relevant candidates.
-
-Another limitation is the system’s dependence on the quality of user input. If the input is vague or minimal, the extracted taste profile becomes sparse, which negatively affects all subsequent steps. Since the system does not currently include a mechanism for asking clarifying questions, this issue propagates through the entire pipeline.
-
-Additionally, inconsistencies in Open Library’s subject tagging can lead to inaccurate scoring, as relevant themes may not always be properly labelled. Finally, the multi-step nature of the system introduces latency, with several sequential API and LLM calls resulting in response times of up to 30 seconds.
+The OMDb API has poor coverage of non-English cinema, so users requesting Bollywood or regional films receive weak or irrelevant candidates. When user input is vague and contains no example titles, the retrieval step produces generic results that the scoring step cannot distinguish meaningfully. Open Library's subject tagging is inconsistent — a book tagged only by author name and not by theme will score low even if it is a strong match. The pipeline is also slow: four sequential LLM calls plus two API calls produce response times of up to 30 seconds, which is impractical for interactive use. There is no mechanism to ask the user a clarifying question, so sparse inputs degrade silently rather than triggering a dialogue.
 
 
 5. Reflection
 
-There are several ways this system could be improved. Introducing a web search step between retrieval and scoring would significantly enhance the quality of candidate recommendations, especially for domains where API coverage is weak. Making the taste profile extraction step iterative would also improve robustness, allowing the system to ask clarifying questions when the input is insufficient.
-
-Another important improvement would be replacing OMDb with a more comprehensive movie database such as TMDB, which offers better support for international content and more flexible filtering options. Together, these enhancements would make the system more accurate, responsive, and adaptable to a wider range of user preferences.
+The most impactful change would be replacing the static API retrieval step with a web search tool, which would give much broader and more current coverage than either Open Library or OMDb. The second change would be making Step 1 iterative: if the taste profile contains fewer than two genres and no example titles, the system should prompt the user with a clarifying question before proceeding. Replacing OMDb with the TMDB API would significantly improve international film coverage. Finally, running the three Step 4 deep-dive calls in parallel rather than sequentially would cut latency roughly in half.
 
 
-Regarding use of AI assistance during development: an LLM (Claude, via
-Cursor) was used. The main corrections required
-were fixing the Python import path setup (the steps directory needed to be
-added to sys.path before importing step modules), fixing a circular import
-in steps/__init__.py, fixing the API key priority logic (GROK_API_KEY was
-checked before GROQ_API_KEY, causing the agent to attempt the broken xAI
-key even when a working Groq key was set), and removing a redundant local
-import inside the _fallback_shortlist function. The prompt for Step 1
-was also revised after testing: the original version did not enforce an
-explicit JSON schema, which caused inconsistent key names across runs
-(genre vs genres, theme vs themes) that broke Step 2's dictionary lookups.
-Adding the explicit schema with enumerated values for mood and preferred_era
-fixed this.
+Regarding AI assistance: Claude (via Cursor) was used throughout development. The main fixes required were: adding the steps directory to sys.path before importing step modules, resolving a circular import in steps/__init__.py, correcting the API key priority logic (GROK_API_KEY was checked before GROQ_API_KEY, causing the agent to attempt a non-functional key), and removing a redundant local import inside the fallback function.
 
+
+======================================================================
+APPENDIX — PROMPT DESIGN EXPLANATION
+======================================================================
+
+The chain has four LLM steps. Step 2 is a pure API call with no LLM, so it is omitted.
+
+--------------------------------------------------------------------------------
+Step 1 — Extract Taste Profile
+--------------------------------------------------------------------------------
+
+System prompt:
+
+  You are a precise preference-extraction assistant. Your job is to read a
+  user's description of what they enjoy in movies or books and convert it into
+  a structured JSON profile. Return ONLY valid JSON — no markdown fences, no
+  explanation outside the JSON. The JSON must follow this exact schema:
+
+  {
+    "genres": ["<genre1>", ...],
+    "themes": ["<theme1>", ...],
+    "mood": "<one of: light, dark, mixed, thrilling, contemplative, adventurous>",
+    "preferred_era": "<one of: classic (pre-1980), modern (1980-2010), contemporary (2010+), any>",
+    "disliked_elements": ["<element1>", ...],
+    "example_titles": ["<title1>", ...],
+    "media_type": "<movie | book | both>",
+    "extra_notes": "<any nuance that did not fit the fields above>"
+  }
+
+  Rules: genres must be canonical names only; themes are abstract ideas; do not
+  invent preferences the user did not express; use empty lists for absent fields.
+
+User prompt:
+
+  User's preference description:
+  """<user_input>"""
+  Media type requested: <media_type>
+  Extract the taste profile now.
+
+Why it is shaped this way: The literal JSON schema and enumerated values for mood and preferred_era are critical because Step 2 accesses genres and example_titles by exact key name to construct API queries, and Step 3 accesses mood and preferred_era by key name to score candidates. Any key-name variation — "genre" vs "genres", or free-text mood values like "dark and gritty" — causes silent KeyErrors or meaningless comparisons. The "no markdown fences" constraint prevents the LLM from wrapping output in ```json ... ``` blocks, which would break JSON parsing. The user prompt wraps the input in triple quotes to prevent injection from user text containing colons or quotes.
+
+Prompt revision after testing: The original system prompt was: "Extract the user's preferences as JSON with fields: genres, themes, mood, preferred_era, disliked_elements, example_titles." In testing, the LLM sometimes returned "genre" (singular), nested fields as "preferences.genres", or produced mood values like "lighthearted", "upbeat", and "tense" — none of which matched the vocabulary Step 3 expected. Step 2 then received empty genre lists and returned no candidates. The fix was embedding the literal schema and enumerating the exact permitted values for mood and preferred_era. After this change, both downstream steps received consistent, parseable profiles across all test inputs.
+
+--------------------------------------------------------------------------------
+Step 3 — Score and Rank Candidates
+--------------------------------------------------------------------------------
+
+System prompt (abbreviated):
+
+  You are an expert recommender system. Score each candidate against the taste
+  profile on a 0–10 scale using this rubric: 9–10 exceptional match, 7–8
+  strong, 5–6 decent, 3–4 weak, 0–2 poor or conflicts with disliked elements.
+  Return ONLY valid JSON: { "shortlist": [ { "title", "media_type", "score",
+  "match_reasons", "concerns", "candidate_index" } ] }. Include at most 5
+  items, ranked descending. Be honest about concerns; do not oversell.
+
+User prompt: taste profile as JSON, followed by candidates formatted as indexed
+one-line strings (e.g. [0] BOOK: "Title" by Author (Year) | Subjects: ... |
+Rating: X.X), followed by "Score and rank the candidates. Return the top 5 as JSON."
+
+Why it is shaped this way: The scoring rubric prevents the LLM from clustering all scores between 7 and 9. The candidate_index field lets the code re-attach the full raw API data to each shortlisted item by index, which Step 4 needs in its user prompt. Without the index, matching by title string fails on punctuation differences. The concerns field is required here because Step 4's output schema has a fair_warning field — if concerns are omitted in Step 3, Step 4 has nothing honest to say.
+
+--------------------------------------------------------------------------------
+Step 4 — Deep-Dive Analysis
+--------------------------------------------------------------------------------
+
+System prompt (abbreviated):
+
+  You are a thoughtful cultural critic. Write a personalised deep-dive for this
+  specific user. Return ONLY valid JSON: { "title", "media_type",
+  "one_line_pitch", "why_this_user", "what_to_expect": { "tone", "pacing",
+  "themes_present" }, "hook", "fair_warning", "perfect_for_when" }.
+
+User prompt: taste profile as JSON, then the single candidate's title, type,
+score, match reasons, concerns, and raw API data.
+
+Why it is shaped this way: Step 4 is called once per title rather than once for all three titles together. When asked to deep-dive multiple items in one prompt the LLM produces noticeably shorter and more generic analyses per title. Each call receives the full taste profile so the hook field can reference the user's own example titles by name. The JSON output schema means Step 5 reads each field by key when populating its Markdown template, with no prose parsing required. Temperature is set to 0.4 — lower than Step 5 — to keep factual claims grounded while still producing readable prose.
+
+--------------------------------------------------------------------------------
+Step 5 — Generate Final Report
+--------------------------------------------------------------------------------
+
+System prompt (abbreviated):
+
+  You are a professional recommendation writer. Write a polished Markdown report
+  following this exact structure: taste profile summary, then one section per
+  top recommendation (score, pitch, why it's for you, what to expect, hook,
+  fair warning, perfect for when), then an "Also Worth Considering" bullet list
+  for remaining shortlist items, then a transparency note. Write in warm
+  second-person voice. Do not invent information not present in the input.
+
+User prompt: taste profile, summarised shortlist (title, score, match_reasons,
+concerns only), and the full deep_dives JSON.
+
+Why it is shaped this way: This is the only step that uses plain chat() rather than chat_json(), because the output is a Markdown document for direct display, not a structure for further parsing. The shortlist is summarised (not the full candidate data) to avoid exceeding the context window. The exact Markdown template in the system prompt ensures consistent structure across runs. The "do not invent" constraint is most important here because Step 5 synthesises outputs from three prior steps and no downstream step will catch hallucinations — the report goes directly to the user.
 
 ================================================================================
 REFERENCES
@@ -62,6 +139,7 @@ REFERENCES
 Open Library API — https://openlibrary.org/developers/api
 OMDb API — https://www.omdbapi.com
 Groq API — https://console.groq.com
-xAI Grok API — https://console.x.ai
 ================================================================================
+
+
 
